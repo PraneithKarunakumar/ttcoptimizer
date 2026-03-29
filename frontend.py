@@ -1,18 +1,18 @@
+import os
 from flask import Flask, send_file, render_template_string
 import folium
-import pika
 import json
-import threading
-import os
 from threading import Lock
 
 app = Flask(__name__)
 
-RABBITMQ_HOST = 'localhost'
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
+RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
 RECOMMENDATION_QUEUE_NAME = 'schedule_recommendation'
+
 ROUTE_COLORS = ["blue", "green", "orange", "red", "black"]
 ROUTES = [39, 36, 29, 110, 97]
-
 MAP_FILE = "static/toronto_map.html"
 
 shared_data = {"latest": None}
@@ -45,46 +45,13 @@ def plot_vehicles_on_map(vehicles):
                 location=[lat, lon],
                 popup=f"Vehicle: {v.get('vehicle_id','N/A')}<br>"
                       f"Route: {v.get('route','N/A')}<br>"
-                      f"Status: {v.get('status','unknown')}",
+                      f"Status: {v.get('status','unknown')}<br>"
+                      f"Occupancy: {v.get('occupancy_status','N/A')}",
                 icon=folium.Icon(color=color, icon="bus", prefix="fa")
             ).add_to(m)
         except:
             continue
-
     m.save(MAP_FILE)
-
-
-def start_consumer():
-    def callback(ch, method, properties, body):
-        try:
-            data = json.loads(body)
-            with data_lock:
-                shared_data["latest"] = data
-
-            # Minimal output
-            print("Update received")
-
-            all_buses = (
-                data.get("kept", []) +
-                data.get("removed", []) +
-                data.get("xtra", []) +
-                data.get("OG", [])
-            )
-
-            plot_vehicles_on_map(all_buses)
-
-        except:
-            pass  # silent fail
-
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
-    channel = connection.channel()
-    channel.queue_declare(queue=RECOMMENDATION_QUEUE_NAME)
-    channel.basic_consume(queue=RECOMMENDATION_QUEUE_NAME, on_message_callback=callback, auto_ack=False)
-
-    print("Consumer started")
-    channel.start_consuming()
 
 
 @app.route('/')
@@ -95,49 +62,42 @@ def dashboard():
     if not data:
         return """
         <h2 style="text-align:center; margin-top:100px; color:#555;">
-            Waiting for first recommendation from worker...
+            Waiting for first recommendation from worker...<br>
+            <small>Make sure producer.py and worker.py are running (locally or as Background Workers)</small>
         </h2>
         """
 
     kept = len(data.get("kept", []))
     removed = len(data.get("removed", []))
     added = len(data.get("xtra", []))
-    total = kept + removed + added
+    total = kept + removed + added + len(data.get("OG", []))
 
     return render_template_string('''
-    <h1 style="text-align:center; color:#2c3e50;">TTC Bus Schedule Dashboard</h1>
+    <h1 style="text-align:center; color:#2c3e50;">TTC Bus Schedule Optimizer</h1>
     
     <div style="display:flex; justify-content:center; gap:30px; margin:30px 0; flex-wrap:wrap;">
-        <div style="background:white; padding:20px 40px; border-radius:12px; 
-                    box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
+        <div style="background:white; padding:20px 40px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
             <h3>Kept</h3><h2 style="color:blue;">{{kept}}</h2>
         </div>
-        <div style="background:white; padding:20px 40px; border-radius:12px; 
-                    box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
+        <div style="background:white; padding:20px 40px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
             <h3>Removed</h3><h2 style="color:red;">{{removed}}</h2>
         </div>
-        <div style="background:white; padding:20px 40px; border-radius:12px; 
-                    box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
+        <div style="background:white; padding:20px 40px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
             <h3>Added</h3><h2 style="color:gray;">{{added}}</h2>
         </div>
-        <div style="background:white; padding:20px 40px; border-radius:12px; 
-                    box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
-            <h3>Total</h3><h2>{{total}}</h2>
+        <div style="background:white; padding:20px 40px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
+            <h3>Total Vehicles</h3><h2>{{total}}</h2>
         </div>
     </div>
 
-    <iframe id="mapframe" src="/map" 
-            style="width:100%; height:780px; border:3px solid #3498db; border-radius:12px;">
-    </iframe>
+    <iframe id="mapframe" src="/map" style="width:100%; height:780px; border:3px solid #3498db; border-radius:12px;"></iframe>
 
     <script>
-        setInterval(function() {
-            const frame = document.getElementById("mapframe");
-            frame.src = "/map?ts=" + Date.now();
-        }, 10000);
+        setInterval(() => {
+            document.getElementById("mapframe").src = "/map?ts=" + Date.now();
+        }, 8000);
     </script>
-
-    <p style="text-align:center; color:#666;">Auto-refreshes every 10 seconds</p>
+    <p style="text-align:center; color:#666; margin-top:10px;">Auto-refreshes every 8 seconds</p>
     ''', kept=kept, removed=removed, added=added, total=total)
 
 
@@ -152,7 +112,5 @@ def serve_map():
 
 if __name__ == '__main__':
     os.makedirs("static", exist_ok=True)
-    threading.Thread(target=start_consumer, daemon=True).start()
-
-    print("Dashboard started")
-    app.run(debug=False, port=5000, use_reloader=False)
+    print("Dashboard running on http://localhost:5000")
+    app.run(debug=False, port=5000)
