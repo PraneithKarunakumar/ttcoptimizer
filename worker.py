@@ -2,14 +2,17 @@ import pika
 import json
 import numpy as np
 import math
+import os
 from sklearn.cluster import KMeans
 
-RABBITMQ_HOST = 'localhost'
-RECOMMENDATION_QUEUE_NAME = 'schedule_recommendation'
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
+RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
+
 BUS_UPDATE_QUEUE_NAME = 'bus_update'
+RECOMMENDATION_QUEUE_NAME = 'schedule_recommendation'
 
 ROUTES = [39, 36, 29, 110, 97]
-
 
 def recommend(vehicles_route_separated):
     budget = 0
@@ -37,7 +40,6 @@ def recommend(vehicles_route_separated):
 
     return kept, removed, OG, xtra
 
-
 def add_buses(vehicles, budget):
     OG, xtra = vehicles.copy(), []
 
@@ -57,15 +59,12 @@ def add_buses(vehicles, budget):
     for idx, v in enumerate(congested):
         if budget <= 0:
             break
-
         new_bus = v.copy()
         new_bus['status'] = "added"
         new_bus['occupancy_status'] = "EMPTY"
-
         offset = 0.0005 * ((-1) ** idx)
         new_bus['lat'] += offset
         new_bus['lon'] += offset
-
         xtra.append(new_bus)
         budget -= 1
 
@@ -86,10 +85,8 @@ def add_buses(vehicles, budget):
     for i in range(len(centers) - 1):
         if budget <= 0:
             break
-
         mid_lat = (centers[i][0] + centers[i + 1][0]) / 2
         mid_lon = (centers[i][1] + centers[i + 1][1]) / 2
-
         new_bus = {
             "vehicle_id": f"new_{len(xtra)}",
             "lat": mid_lat,
@@ -102,7 +99,6 @@ def add_buses(vehicles, budget):
         budget -= 1
 
     return OG, xtra
-
 
 def filter_buses(vehicles):
     if len(vehicles) < 5:
@@ -127,7 +123,6 @@ def filter_buses(vehicles):
 
     for cluster_id in range(k):
         cluster_buses = [vehicles[i] for i in range(len(vehicles)) if labels[i] == cluster_id]
-
         non_empty = [v for v in cluster_buses if v['occupancy_status'] != "EMPTY"]
         bus_to_keep = non_empty[0] if non_empty else cluster_buses[0]
 
@@ -141,7 +136,6 @@ def filter_buses(vehicles):
 
     return kept, removed
 
-
 def callback(ch, method, properties, body):
     try:
         data = json.loads(body)
@@ -150,13 +144,11 @@ def callback(ch, method, properties, body):
         kept, removed, OG, xtra = recommend(vehicles_route_separated)
         data_send = {"kept": kept, "removed": removed, "OG": OG, "xtra": xtra}
 
-        message = json.dumps(data_send)
-        publish_channel.basic_publish(
+        publish_ch.basic_publish(
             exchange='',
             routing_key=RECOMMENDATION_QUEUE_NAME,
-            body=message
+            body=json.dumps(data_send)
         )
-
         print("Sent recommendation update")
 
     except Exception as e:
@@ -164,18 +156,16 @@ def callback(ch, method, properties, body):
 
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
-
 if __name__ == '__main__':
-    connection = pika.BlockingConnection(
-        pika.ConnectionParameters(host=RABBITMQ_HOST)
-    )
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    parameters = pika.ConnectionParameters(host=RABBITMQ_HOST, credentials=credentials)
 
+    connection = pika.BlockingConnection(parameters)
     consume_channel = connection.channel()
-    consume_channel.queue_declare(queue=BUS_UPDATE_QUEUE_NAME)
+    publish_ch = connection.channel()
 
-    global publish_channel
-    publish_channel = connection.channel()
-    publish_channel.queue_declare(queue=RECOMMENDATION_QUEUE_NAME)
+    consume_channel.queue_declare(queue=BUS_UPDATE_QUEUE_NAME)
+    publish_ch.queue_declare(queue=RECOMMENDATION_QUEUE_NAME)
 
     consume_channel.basic_consume(
         queue=BUS_UPDATE_QUEUE_NAME,
