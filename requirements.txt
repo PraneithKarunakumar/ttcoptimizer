@@ -1,0 +1,9 @@
+flask
+gunicorn
+pika
+requests
+google-transit
+protobuf
+folium
+numpy
+scikit-learn
